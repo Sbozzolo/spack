@@ -756,3 +756,57 @@ def test_expand_build_deps_source_only_includes_nested_build_deps(temporary_stor
     # nested_build_tool must also be added (BUILD dep of build_tool). This is the bug: without the
     # fix, expand_build_deps only traverses LINK|RUN, so nested_build_tool is missing.
     assert specs["nested_build_tool"].dag_hash() in added_hashes
+
+
+def _roots_sharing_a_dependency():
+    """root -link-> dep -build-> compiler, where compiler is also a root (as with spec groups)."""
+    specs = create_dag(
+        nodes=["root", "dep", "compiler"],
+        edges=[("root", "dep", "link"), ("dep", "compiler", "build")],
+    )
+    for s in specs.values():
+        s._mark_concrete()
+    return specs
+
+
+def test_install_package_false_keeps_roots_needed_by_other_roots(temporary_store):
+    """A root that is a dependency of another root is installed with install_package=False."""
+    specs = _roots_sharing_a_dependency()
+    bg = BuildGraph(
+        specs=[specs["root"], specs["compiler"]],
+        root_policy="auto",
+        dependencies_policy="auto",
+        include_build_deps=True,
+        install_package=False,
+        install_deps=True,
+        database=temporary_store.db,
+    )
+
+    assert specs["root"].dag_hash() not in bg.nodes
+    assert specs["dep"].dag_hash() in bg.nodes
+    assert specs["compiler"].dag_hash() in bg.nodes
+    assert bg.parent_to_child[specs["dep"].dag_hash()] == {specs["compiler"].dag_hash()}
+
+
+def test_expand_build_deps_adds_skipped_root(temporary_store):
+    """A root skipped by install_package=False is re-added when a build dep expansion needs it."""
+    specs = _roots_sharing_a_dependency()
+    bg = BuildGraph(
+        specs=[specs["root"], specs["compiler"]],
+        root_policy="auto",
+        dependencies_policy="auto",
+        include_build_deps=False,
+        install_package=False,
+        install_deps=True,
+        database=temporary_store.db,
+    )
+    dep_hash, compiler_hash = specs["dep"].dag_hash(), specs["compiler"].dag_hash()
+    assert compiler_hash not in bg.nodes
+
+    pending = []
+    with temporary_store.db.read_transaction():
+        newly_added = bg.expand_build_deps([dep_hash], pending, temporary_store.db)
+
+    assert newly_added == [compiler_hash]
+    assert bg.parent_to_child[dep_hash] == {compiler_hash}
+    assert pending == [compiler_hash]

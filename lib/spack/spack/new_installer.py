@@ -1486,6 +1486,9 @@ class BuildGraph:
         overwrite_set = overwrite_set or set()
         explicit_set = explicit_set or set()
         self.pruned: Set[str] = set()
+        #: Uninstalled roots pruned only because ``install_package=False``. Unlike other pruned
+        #: specs, they are not installed, so they must be re-added if another node needs them.
+        self.skipped_roots: Set[str] = set()
         self.done: Set[str] = set()
         self.force_source: Set[str] = set()
         stack: List[Tuple[spack.spec.Spec, InstallPolicy]] = [
@@ -1554,9 +1557,16 @@ class BuildGraph:
                 else:
                     self.child_to_parent[child] = {parent}
 
-        # If we're not installing the package itself, mark root specs for pruning too
+        # If we're not installing the package itself, mark root specs for pruning too. Roots that
+        # are also dependencies of other nodes in the graph (e.g. a compiler in one environment
+        # group that is a build dependency of the roots in another) must still be installed.
         if not install_package:
-            self.pruned.update(s.dag_hash() for s in specs)
+            for s in specs:
+                key = s.dag_hash()
+                if key in self.pruned or key in self.child_to_parent:
+                    continue
+                self.pruned.add(key)
+                self.skipped_roots.add(key)
 
         # Prune specs from the build graph. Their parents become parents of their children and
         # their children become children of their parents.
@@ -1623,6 +1633,10 @@ class BuildGraph:
             if not children:
                 pending_builds.append(parent)
 
+    def _is_pruned(self, dag_hash: str) -> bool:
+        """Whether a spec was pruned because it is installed (not merely a skipped root)."""
+        return dag_hash in self.pruned and dag_hash not in self.skipped_roots
+
     def has_unexpanded_build_deps(self, dag_hash: str) -> bool:
         return bool(self.get_unexpanded_build_deps(dag_hash))
 
@@ -1636,7 +1650,7 @@ class BuildGraph:
                 unexpanded.append(edge.spec)
         if dag_hash in self.force_source and spec.build_spec is not spec:
             bh = spec.build_spec.dag_hash()
-            if bh not in self.nodes and bh not in self.done and bh not in self.pruned:
+            if bh not in self.nodes and bh not in self.done and not self._is_pruned(bh):
                 unexpanded.append(spec.build_spec)
         return unexpanded
 
@@ -1665,8 +1679,10 @@ class BuildGraph:
             dep_hash = dep.dag_hash()
 
             # Skip installed deps
-            if dep_hash in self.pruned or dep_hash in self.done:
+            if self._is_pruned(dep_hash) or dep_hash in self.done:
                 continue
+            self.pruned.discard(dep_hash)
+            self.skipped_roots.discard(dep_hash)
 
             # If already in the graph (e.g. overwrite build in progress), add edge but don't
             # re-add node. This must be checked before the DB installed check, because an
