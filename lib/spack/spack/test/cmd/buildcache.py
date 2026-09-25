@@ -29,6 +29,7 @@ from spack.installer import PackageInstaller
 from spack.llnl.util.filesystem import copy_tree, find, getuid
 from spack.llnl.util.lang import nullcontext
 from spack.paths import test_path
+from spack.test.traverse import create_dag
 from spack.url_buildcache import (
     BuildcacheComponent,
     URLBuildcacheEntry,
@@ -446,6 +447,19 @@ def test_correct_specs_are_pushed(
 
     # Ensure no duplicates
     assert len(set(uploader.pushed)) == len(uploader.pushed)
+
+
+@pytest.mark.parametrize("build_deps,expected", [(True, {"b", "c"}), (False, {"c"})])
+def test_specs_to_be_packaged_only_dependencies_keeps_requested_dependencies(build_deps, expected):
+    """a --build--> b, a --link--> c, where a and b are requested. b is a dependency of a, so it is
+    packaged with --only dependencies, as long as build dependencies are."""
+    specs = create_dag(nodes=["a", "b", "c"], edges=[("a", "b", "build"), ("a", "c", "link")])
+    for s in specs.values():
+        s._mark_concrete()
+    packaged = spack.cmd.buildcache._specs_to_be_packaged(
+        [specs["a"], specs["b"]], "dependencies", build_deps
+    )
+    assert {s.name for s in packaged} == expected
 
 
 @pytest.mark.parametrize("signed", [True, False])
